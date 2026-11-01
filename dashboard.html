@@ -1757,6 +1757,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '启用自动绑定': 'Enable auto-binding',
     '已启用：导入时按域名绑定出站身份': 'On: outbound identity is bound from the domain on import',
     '已关闭导入时按域名绑定出站身份': 'Binding outbound identity from the domain on import is off',
+    '出站身份版本号自动刷新': 'Auto-refresh outbound identity versions',
+    '启用自动刷新': 'Enable auto-refresh',
+    '已启用：出站身份版本号自动刷新': 'On: outbound identity versions auto-refresh',
+    '已关闭出站身份版本号自动刷新': 'Outbound identity version auto-refresh is off',
+    '当前缓存为空，开启后会立即查询一次。': 'The cache is empty; enabling queries once right away.',
     '剩余积分 / 额度': 'Credits / quota left',
     '剩余积分 ·': 'Credits left ·',
     '剩余额度最大': 'Most quota left',
@@ -3388,6 +3393,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "启用自动绑定": "啟用自動綁定",
     "已启用：导入时按域名绑定出站身份": "已啟用：匯入時按網域綁定出站身分",
     "已关闭导入时按域名绑定出站身份": "已關閉匯入時按網域綁定出站身分",
+    "出站身份版本号自动刷新": "出站身分版本號自動重新整理",
+    "启用自动刷新": "啟用自動重新整理",
+    "已启用：出站身份版本号自动刷新": "已啟用：出站身分版本號自動重新整理",
+    "已关闭出站身份版本号自动刷新": "已關閉出站身分版本號自動重新整理",
+    "当前缓存为空，开启后会立即查询一次。": "目前快取為空，開啟後會立即查詢一次。",
     "出口级瞬时失败退避": "出口級瞬時失敗退避",
     "启用出口级退避": "啟用出口級退避",
     "跨出口回退（国际版 → 国内版）": "跨出口回退（國際版 → 國內版）",
@@ -5543,6 +5553,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               启用自动绑定
             </label>
             <button onclick="saveAutoBindIdentity(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">出站身份版本号自动刷新 <em id="setAutoRefreshVersionsState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              每隔 3 天从官方 npm 包 <code>@tencent-ai/codebuddy-code</code> 查一次 CodeBuddy CLI 的最新版本号并缓存；<span id="setAutoRefreshVersionsCache"></span>
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              只刷新 CLI 的版本号——桌面端与 VSCode 插件没有公开的版本来源（官方升级接口需要账号鉴权），这里不会编造。版本号是线上指纹的一部分，但<b>只改字符串，不改头族与请求体</b>：发「新版本号 + 旧头族」未必比「旧版本号 + 旧头族」更安全，所以默认关闭。面板里手动填过的版本号永远优先。取不到时回落到已验证的默认值。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAutoRefreshVersions" type="checkbox" style="width:16px;height:16px">
+              启用自动刷新
+            </label>
+            <button onclick="saveAutoRefreshVersions(this)">保存</button>
           </div>
         </div>
       </section>
@@ -12497,6 +12528,26 @@ async function loadSettings(showToast){
         autoBindState.textContent = autoBindIdentity ? '(已启用)' : '(未启用)';
         autoBindState.style.color = autoBindIdentity ? 'var(--accent2)' : 'var(--dim)';
       }
+      const autoRefreshVersions = data.auto_refresh_versions === true;
+      const autoRefreshInput = document.getElementById('setAutoRefreshVersions');
+      if(autoRefreshInput) autoRefreshInput.checked = autoRefreshVersions;
+      const autoRefreshState = document.getElementById('setAutoRefreshVersionsState');
+      if(autoRefreshState){
+        autoRefreshState.textContent = autoRefreshVersions ? '(已启用)' : '(未启用)';
+        autoRefreshState.style.color = autoRefreshVersions ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const versionCacheEl = document.getElementById('setAutoRefreshVersionsCache');
+      if(versionCacheEl){
+        const cache = data.identity_version_cache || {};
+        const row = cache.cli;
+        if(!row){
+          versionCacheEl.textContent = '当前缓存为空，开启后会立即查询一次。';
+        } else {
+          const days = Math.floor((row.age_seconds || 0) / 86400);
+          const age = days >= 1 ? (days + ' 天前') : (Math.floor((row.age_seconds || 0) / 3600) + ' 小时前');
+          versionCacheEl.textContent = '缓存：CLI ' + row.version + '（' + age + '获取' + (row.fresh ? '，仍有效' : '，已过期') + '）。';
+        }
+      }
       const realmFallback = data.realm_fallback_enabled === true;
       const realmFallbackInput = document.getElementById('setRealmFallback');
       if(realmFallbackInput) realmFallbackInput.checked = realmFallback;
@@ -13668,6 +13719,21 @@ async function saveAutoBindIdentity(btn){
   try {
     await postJSON('/settings/save', {auto_bind_identity: value});
     toast(value ? '已启用：导入时按域名绑定出站身份' : '已关闭导入时按域名绑定出站身份', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveAutoRefreshVersions(btn){
+  const el = document.getElementById('setAutoRefreshVersions');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {auto_refresh_versions: value});
+    toast(value ? '已启用：出站身份版本号自动刷新' : '已关闭出站身份版本号自动刷新', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

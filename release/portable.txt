@@ -59,6 +59,7 @@ wb_codearts_crypto.py
 wb_egress.py
 wb_fingerprint.py
 wb_identity.py
+wb_identity_versions.py
 wb_ipintel.py
 wb_logstore.py
 wb_modelsdev.py

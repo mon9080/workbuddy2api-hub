@@ -131,6 +131,11 @@ EGRESS_BACKOFF_ENABLED_KEY = "egress_backoff_enabled"
 # 改变导入结果，属于行为变更，老安装保持原样。
 AUTO_BIND_IDENTITY_KEY = "auto_bind_identity"
 
+# 出站身份版本号按 TTL 从官方来源刷新（目前只有 CLI 有公开来源）。缺失键读作
+# 关：版本号是线上指纹的一部分，而头族与请求体是按版本单独核对过的，追新
+# 未必更安全（见 wb_identity.configure_versions 的说明）。
+AUTO_REFRESH_VERSIONS_KEY = "auto_refresh_versions"
+
 # 跨出口回退（国际版 → 国内版）：国际版出口把某个模型限流 / 当日额度用满 /
 # 整池冷却时，允许拿同名的国内版出口再试一次。缺失键读作关 —— 两个出口是两套
 # 上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去
@@ -2050,6 +2055,28 @@ def set_auto_bind_identity(accounts_dir, enabled):
     with _lock:
         data = load(accounts_dir)
         data[AUTO_BIND_IDENTITY_KEY] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def auto_refresh_versions(accounts_dir):
+    """Whether outbound identity versions are refreshed from the official source.
+
+    Off unless the operator turns it on. The version numbers are part of the
+    wire fingerprint: wb_identity.configure_versions() changes only the string,
+    never the header family or the request body, and those were verified per
+    version. A newer number sent with an older header shape is a worse disguise
+    than an older number, so this stays opt-in.
+    """
+    return load(accounts_dir).get(AUTO_REFRESH_VERSIONS_KEY) is True
+
+
+def set_auto_refresh_versions(accounts_dir, enabled):
+    """Persist the version-refresh switch. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data[AUTO_REFRESH_VERSIONS_KEY] = enabled
         save(accounts_dir, data)
     return enabled
 

@@ -81,6 +81,7 @@ import wb_tiers
 import wb_upstream_pool
 import wb_webtools
 import wb_identity
+import wb_identity_versions
 import wb_prompt
 import wb_modelsdev
 import wb_probes
@@ -6049,10 +6050,39 @@ def _credits_sweep(targets, paced=True):
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
 ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
+
+
+def _identity_version_overrides(accounts_dir):
+    """Panel-set versions, plus the cache when auto-refresh is on.
+
+    The panel value always wins: it is an explicit operator choice, and the
+    cache exists only to keep the string current for installs that asked for
+    that. A refresh failure yields {} and the verified defaults stay in place.
+    """
+    overrides = {}
+    try:
+        overrides.update(wb_settings.identity_versions(accounts_dir) or {})
+    except Exception:
+        pass
+    try:
+        auto = wb_settings.auto_refresh_versions(accounts_dir)
+    except Exception:
+        auto = False
+    if auto:
+        try:
+            fetched = wb_identity_versions.resolve(accounts_dir)
+        except Exception as exc:
+            log("identity versions: refresh failed (%s)" % exc)
+            fetched = {}
+        for key, value in fetched.items():
+            overrides.setdefault(key, value)
+    return overrides
+
+
 try:
     # Panel-set version overrides ride on top of the verified defaults; the
     # identity module only changes the version strings it sends.
-    wb_identity.configure_versions(wb_settings.identity_versions(ACCOUNTS_DIR))
+    wb_identity.configure_versions(_identity_version_overrides(ACCOUNTS_DIR))
 except Exception:
     pass
 def realm_state_file():
@@ -10310,6 +10340,10 @@ def runtime_settings_view():
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "auto_bind_identity":
             wb_settings.auto_bind_identity(ACCOUNTS_DIR),
+        "auto_refresh_versions":
+            wb_settings.auto_refresh_versions(ACCOUNTS_DIR),
+        "identity_version_cache":
+            wb_identity_versions.cached_versions(ACCOUNTS_DIR),
         "realm_fallback_enabled":
             wb_settings.realm_fallback_enabled(ACCOUNTS_DIR),
         "account_max_concurrent":
@@ -20381,6 +20415,25 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_auto_bind_identity(ACCOUNTS_DIR, raw)
             reply["auto_bind_identity"] = raw
+        if "auto_refresh_versions" in payload:
+            # 版本号自动刷新（默认关）：只影响下一次 configure_versions()，
+            # 已在飞的请求形态不变——这正是它不能热改身份版本的原因。
+            raw = payload.get("auto_refresh_versions")
+            if not isinstance(raw, bool):
+                return self._error(400, "auto_refresh_versions must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_auto_refresh_versions(ACCOUNTS_DIR, raw)
+            reply["auto_refresh_versions"] = raw
+            if raw:
+                # 打开就立刻按 TTL 解析一次，面板能马上看到缓存里有什么；
+                # 失败（无网络）不报错，默认值照常生效。
+                try:
+                    overrides = _identity_version_overrides(ACCOUNTS_DIR)
+                    wb_identity.configure_versions(overrides)
+                except Exception as exc:
+                    log("identity versions: apply failed (%s)" % exc)
+                reply["identity_version_cache"] = \
+                    wb_identity_versions.cached_versions(ACCOUNTS_DIR)
         if "egress_backoff_enabled" in payload:
             # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
             # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。
