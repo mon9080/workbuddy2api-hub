@@ -127,6 +127,46 @@ class ResolveTests(_DirMixin, unittest.TestCase):
         got = V.resolve(self.dir, fetch=lambda: "4.0.0", now=NOW)
         self.assertEqual(got, {"cli": "4.0.0"})
 
+    def test_in_process_copy_survives_a_failed_write(self):
+        """The in-process copy is what keeps a read-only cache dir usable.
+
+        Windows ignores directory permission bits, so instead of chmod this
+        replaces _write_cache with one that always fails - the same condition
+        the guard exists for, on every platform.
+        """
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return "8.8.8"
+
+        d = tempfile.mkdtemp(prefix="wbver-ro-")
+        original = V._write_cache
+        try:
+            V._write_cache = lambda *a, **k: False
+            first = V.resolve(d, fetch=fetch, now=NOW)
+            second = V.resolve(d, fetch=fetch, now=NOW)
+            self.assertEqual(first, {"cli": "8.8.8"})
+            self.assertEqual(second, {"cli": "8.8.8"})
+            self.assertEqual(len(calls), 1,
+                             "the in-process copy must survive a failed write")
+        finally:
+            V._write_cache = original
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_clear_cache_drops_the_in_process_copy(self):
+        d = tempfile.mkdtemp(prefix="wbver-clr-")
+        try:
+            V.resolve(d, fetch=lambda: "7.7.7", now=NOW)
+            V.clear_cache(d)
+            calls = []
+            V.resolve(d, fetch=lambda: (calls.append(1), "6.6.6")[1], now=NOW)
+            self.assertEqual(len(calls), 1, "clearing must force a refetch")
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_corrupt_cache_file_is_treated_as_empty(self):
         with open(V.cache_path(self.dir), "w", encoding="utf-8") as fh:
             fh.write("{not json")

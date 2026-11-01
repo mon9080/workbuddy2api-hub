@@ -5432,6 +5432,9 @@ def normalise_import_row(row, realm=None, bind_identity=False):
             "accessToken": row.get("access_token"),
             "refreshToken": row.get("refresh_token"),
             "expiresAt": row.get("expires_at"),
+            # product 必须一起搬过来：漏了它，"显式身份优先"在 snake_case
+            # 导出行上就不成立（会被 domain 推导覆盖）。
+            "product": row.get("product"),
             "source": "cockpit",
         }
     auth = row.get("auth") if isinstance(row.get("auth"), dict) else None
@@ -5506,14 +5509,16 @@ def normalise_import_row(row, realm=None, bind_identity=False):
         "lastError": "",
         "cooldownUntil": 0.0,
     }
-    # 出站身份：显式给的值永远优先；没有显式值且开关打开时，才按 domain 推导。
-    # 开关关着（默认）或域名认不出时不写这个键，Account.__init__ 仍按原逻辑
-    # 回退 workbuddy，导入结果与改动前逐字段一致。
-    stated = pick("product")
-    if stated:
-        out["product"] = wb_identity.normalize_product(stated)
-    elif bind_identity:
-        bound = wb_identity.product_for_domain(out["domain"])
-        if bound:
-            out["product"] = bound
+    # 出站身份：开关关着（默认）时一律不写这个键，Account.__init__ 仍按原
+    # 逻辑回退 workbuddy——包括行里显式带了 product 的情况，因为那同样会改变
+    # 导入结果，"关闭时与改动前逐字段一致"才对得起 CONTRIBUTING 的默认行为
+    # 约束。开关打开时：行里的显式值优先，其次按 domain 推导，认不出就不写。
+    if bind_identity:
+        stated = pick("product")
+        if stated:
+            out["product"] = wb_identity.normalize_product(stated)
+        else:
+            bound = wb_identity.product_for_domain(out["domain"])
+            if bound:
+                out["product"] = bound
     return out

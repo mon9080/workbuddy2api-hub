@@ -149,6 +149,96 @@ CLI_CACHE_RETENTION = "long"
 #: 官方 CLI 的 chat 请求体不带这几个字段（Responses API 的字段 / 客户端自定义
 #: metadata）。网关会把客户端 payload 原样带出去，CLI 身份下要剔掉。
 CLI_BODY_DROP_FIELDS = ("metadata", "conversation_id", "previous_response_id")
+#: 官方 CLI 在 chat 请求体里按需补的思考摘要开关。取自 npm 包
+#: @tencent-ai/codebuddy-code 2.179.1 解包（dist/codebuddy.js 的
+#: injectReasoningSummaryIfNeeded）：只要「思考已开启」或 body 带
+#: reasoning_effort / reasoning.effort，且还没写 reasoning_summary，就置为
+#: "auto"。值为 "auto" 时上游才回思考摘要；不写则上游不回，客户端拿不到
+#: 摘要文本。默认不注入——见 reasoning_summary_for() 的说明。
+CLI_REASONING_SUMMARY = "auto"
+#: 官方 CLI 在「思考关闭」时补的推理等级。同一段 axiosToFetchAdapter 里：
+#: chat 路径且端点是 product-gateway 时，若本会话 thinkingEnabled 显式为
+#: false（或未设置且 alwaysThinkingEnabled 为 false），就把
+#: reasoning_effort 置为 "none"。网关不掌握客户端的 alwaysThinkingEnabled，
+#: 只在请求已经表达了"关掉思考"（effort 为 none / thinking.type 为 disabled）
+#: 时对齐——此时官方补 "none"，这里也补 "none"，而不是补摘要。
+CLI_REASONING_EFFORT_OFF = "none"
+
+
+def _effort_text(body):
+    """请求体里的推理等级（字符串形态），没有则 None。
+
+    官方判据是 `typeof === "string"`，所以数字 / null / 对象都不算表达。
+    两种拼写都读：客户端的 camelCase `reasoningEffort` 与 snake_case
+    `reasoning_effort` 在本仓库别处（wb_proxy.client_effort_of）同等对待，
+    这里也必须一致——否则驼峰客户端写了 "none" 会被当成没表达，反而被补上
+    摘要。
+    """
+    for key in ("reasoning_effort", "reasoningEffort"):
+        effort = body.get(key)
+        if isinstance(effort, str) and effort.strip():
+            return effort.strip().lower()
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        inner = reasoning.get("effort")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip().lower()
+    return None
+
+
+def thinking_is_off(body, *, can_disable=True):
+    """请求是否明确关掉了思考。判定口径与官方 chat 分支一致。
+
+    官方在 chat 路径（且端点是 product-gateway）上：
+        thinking === false  ->  body.reasoning_effort = "none"
+    网关不掌握客户端的 alwaysThinkingEnabled，只能读请求体已经表达出来的
+    信号：`reasoning_effort` / `reasoning.effort` 为 "none"，或
+    `thinking.type` 为 "disabled"。两者任一成立即视为关掉。
+
+    ``can_disable`` 为 False 时（模型目录声明 canDisableThinking=False），
+    这个模型根本不允许关思考，`map_reasoning_effort()` 已经把等级修正回它
+    支持的档位；此时不能再把 "none" 写回去，否则等于撤销那层修正、重新发出
+    一个模型不接受的等级。调用方传模型能力，不传就按"允许"处理。
+    """
+    if not can_disable:
+        return False
+    if not isinstance(body, dict):
+        return False
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        if str(thinking.get("type") or "").strip().lower() == "disabled":
+            return True
+    return _effort_text(body) == CLI_REASONING_EFFORT_OFF
+
+
+def reasoning_summary_for(body, *, can_disable=True):
+    """官方 CLI 会在什么条件下补 reasoning_summary，回传该值或 None。
+
+    对齐 2.179.1 的 axiosToFetchAdapter：注入条件是 `body && !responses`，
+    即在 **chat 路径**上、且 injectReasoningSummaryIfNeeded 判定为需要时
+    补 "auto"。判定本身要求「请求表达了要思考」——body 带字符串
+    reasoning_effort，或带 reasoning.effort——且客户端没自己写。
+
+    两条与「思考关闭」互斥的处理，都按官方来：
+      - reasoning_effort 为 "none"：官方那段会把 effort 压成 "none"，不是
+        开思考；这里回 None，不注入摘要。
+      - thinking.type 为 "disabled"：客户端明确关了思考，同样回 None。
+
+    官方第三个触发条件（客户端本地 alwaysThinkingEnabled 且模型
+    supportsReasoning）是客户端设置，网关无从得知，故意不猜：少补只是不发
+    摘要，多补会改变调用方意图。
+    """
+    if not isinstance(body, dict):
+        return None
+    if body.get("reasoning_summary"):
+        return None
+    # 思考被关掉时不补摘要：官方那条分支压的是 effort，不是摘要。
+    if thinking_is_off(body, can_disable=can_disable):
+        return None
+    effort = _effort_text(body)
+    if effort is None:
+        return None
+    return CLI_REASONING_SUMMARY
 
 # 官方 VSCode 扩展 4.12.39997873（Open VSX `Tencent-Cloud.coding-copilot`，
 # 解包源码的 product.json）：productName=CodeBuddy、platform=VSCode、

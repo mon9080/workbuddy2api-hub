@@ -11656,6 +11656,34 @@ def start_catalog_daily():
                      daemon=True).start()
 
 
+def identity_versions_loop():
+    """每小时检查一次版本缓存，过期就刷新并应用。
+
+    没有这个循环，`auto_refresh_versions` 只在启动和面板保存那一刻生效：
+    进程连跑三天后缓存早就过期，却永远不会再拉一次，与面板上写的「每 3 天
+    刷新」不符；启动时若网络不通，恢复后也不会自动重试。TTL 判断留在
+    wb_identity_versions.resolve() 里，这里只负责周期性敲门。
+    """
+    time.sleep(90)   # 让启动流程先跑完
+    while True:
+        try:
+            if wb_settings.auto_refresh_versions(ACCOUNTS_DIR):
+                overrides = _identity_version_overrides(ACCOUNTS_DIR)
+                # resolve() 里可能有一次网络往返（几秒）。这期间操作者可能
+                # 已经把开关关掉了；拿着旧快照 apply 会把刚撤下的缓存版本
+                # 又装回去，而且不会再撤。应用前再读一次设置。
+                if wb_settings.auto_refresh_versions(ACCOUNTS_DIR):
+                    wb_identity.configure_versions(overrides)
+        except Exception as exc:
+            log("identity versions: periodic refresh failed (%s)" % exc)
+        time.sleep(3600)
+
+
+def start_identity_versions():
+    threading.Thread(target=identity_versions_loop, name="identity-versions",
+                     daemon=True).start()
+
+
 def product_config_path(realm):
     """The desktop cache file for a realm (the intl app writes its own)."""
     home = os.path.expanduser("~")
@@ -13500,7 +13528,16 @@ def build_upstream_body(payload):
         thinking = body.get("thinking")
         opted_out = isinstance(thinking, dict) and \
             str(thinking.get("type") or "").strip().lower() == "disabled"
-        effort = body.get("reasoning_effort") or body.get("reasoningEffort")
+        effort = client_effort_of(body)
+        # nested reasoning.effort 也是客户端表达（wb_identity._effort_text
+        # 同样读它）。只看顶层会把 reasoning={"effort":"none"} 当成"没表达"，
+        # 于是补一个 high，把客户端的关闭意图盖掉。
+        if not effort:
+            nested = body.get("reasoning")
+            if isinstance(nested, dict):
+                inner = nested.get("effort")
+                if isinstance(inner, str) and inner.strip():
+                    effort = inner.strip()
         if not opted_out and str(effort or "").strip().lower() != "none":
             if "thinking" not in body:
                 body["thinking"] = {"type": "enabled"}
@@ -14617,7 +14654,7 @@ def _free_model_credit_fallback_enabled():
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
                   allow_credit_fallback=True, allow_product_switch=True,
                   pin_account=None, defer_egress_success=False,
-                  allowed_accounts=None):
+                  allowed_accounts=None, wire="chat"):
     # Refresh the daily guards before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -14870,9 +14907,40 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         cli_identity = account.is_cli_identity()
         vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
         if cli_identity:
+            # 这个 dict 推导本身就是一次复制，后续原地写入不会碰到
+            # upstream_body（重试循环外创建、循环外还有 upstream_effort_of()
+            # 要读它）。
             attempt_body = {k: v for k, v in attempt_body.items()
                             if k not in wb_identity.CLI_BODY_DROP_FIELDS}
             attempt_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
+            # 官方 CLI 2.179.1 的两条**互斥**推理分支（见 wb_identity）：
+            #   - 请求表达了要思考 -> 补 reasoning_summary=auto
+            #   - 思考被关掉       -> 把 effort 压成 "none"
+            # 两者都只在 chat 路径上做（官方 `if (body && !eG)`，eG 即
+            # isOpenAIResponsesApi）：/v1/responses 翻译成 chat 后同样走到这里，
+            # 但那是 responses wire，官方不会加这两个字段，这里也不加。
+            # 模型目录声明 canDisableThinking=False 时，map_reasoning_effort()
+            # 已经把等级修正回它支持的档位；此时不能再把 "none" 写回去，
+            # 否则等于撤销那层修正、重新发出模型不接受的等级。
+            _reasoning = model_reasoning_meta(model)
+            can_disable = _reasoning.get("canDisableThinking") is not False
+            if wire == "chat":
+                if wb_identity.thinking_is_off(attempt_body, can_disable=can_disable):
+                    if ("reasoning_effort" in attempt_body
+                            or "reasoningEffort" in attempt_body):
+                        key = ("reasoning_effort" if "reasoning_effort" in attempt_body
+                               else "reasoningEffort")
+                        attempt_body[key] = wb_identity.CLI_REASONING_EFFORT_OFF
+                    else:
+                        # 只有 thinking.type=disabled、没写 effort 的请求：官方
+                        # 在这条分支上直接写 reasoning_effort，这里同样补上。
+                        attempt_body["reasoning_effort"] = \
+                            wb_identity.CLI_REASONING_EFFORT_OFF
+                else:
+                    summary = wb_identity.reasoning_summary_for(
+                        attempt_body, can_disable=can_disable)
+                    if summary:
+                        attempt_body["reasoning_summary"] = summary
         # 紧凑 JSON：官方客户端（Node JSON.stringify）不带分隔符后的空格，默认的
         # json.dumps(separators=(", ", ": ")) 会让 body 字节与 Content-Length 都成
         # 一处机器特征。上游解析等价，只影响线上字节。
@@ -20261,7 +20329,10 @@ class Handler(BaseHTTPRequestHandler):
                 stored = wb_settings.set_identity_versions(ACCOUNTS_DIR, raw)
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
-            wb_identity.configure_versions(stored)
+            # 走同一个合并入口：手动值优先、自动缓存补位。直接
+            # configure_versions(stored) 会整体替换覆盖表，把自动刷新已经
+            # 生效的缓存版本一并抹掉（而开关还是开着的）。
+            wb_identity.configure_versions(_identity_version_overrides(ACCOUNTS_DIR))
             reply["identity_versions"] = stored
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
@@ -20424,16 +20495,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_auto_refresh_versions(ACCOUNTS_DIR, raw)
             reply["auto_refresh_versions"] = raw
-            if raw:
-                # 打开就立刻按 TTL 解析一次，面板能马上看到缓存里有什么；
-                # 失败（无网络）不报错，默认值照常生效。
-                try:
-                    overrides = _identity_version_overrides(ACCOUNTS_DIR)
-                    wb_identity.configure_versions(overrides)
-                except Exception as exc:
-                    log("identity versions: apply failed (%s)" % exc)
-                reply["identity_version_cache"] = \
-                    wb_identity_versions.cached_versions(ACCOUNTS_DIR)
+            # 开和关都重新计算并应用：关掉开关必须让缓存版本从线上撤下来，
+            # 否则"关掉即恢复原行为"不成立——进程会一直发着旧缓存值直到重启。
+            try:
+                overrides = _identity_version_overrides(ACCOUNTS_DIR)
+                wb_identity.configure_versions(overrides)
+            except Exception as exc:
+                log("identity versions: apply failed (%s)" % exc)
+            reply["identity_version_cache"] = \
+                wb_identity_versions.cached_versions(ACCOUNTS_DIR)
         if "egress_backoff_enabled" in payload:
             # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
             # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。
@@ -22267,6 +22337,11 @@ class Handler(BaseHTTPRequestHandler):
             upstream, account, effort = open_upstream_with_fallback(
                 chat_req, session_key=session_key, target_realm=req_realm,
                 allow_realm_fallback=not explicit_realm,
+                # 这是 /v1/responses 翻译成 chat 后的上游调用：官方 CLI 在
+                # responses wire 上不加 cache_retention 之外的推理字段，
+                # open_upstream 的 CLI 分支据此跳过 reasoning_summary /
+                # effort=none 的注入。
+                wire="responses",
                 **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
@@ -23019,6 +23094,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload, session_key=session_key, target_realm=req_realm,
                 allow_realm_fallback=not explicit_realm,
                 prebuilt_body=forwarded, defer_egress_success=True,
+                # 原生 /v1/chat/completions：显式声明 wire，不依赖默认值——
+                # open_upstream 的 CLI 分支只在 chat 上注入推理字段。
+                wire="chat",
                 **key_open_kwargs(getattr(self, "key_entry", None)))
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
@@ -23625,6 +23703,13 @@ def _bootstrap_runtime(args):
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
+    # 模块级那次 configure_versions() 用的是默认目录（ACCOUNTS_DIR 当时还没
+    # 被 --accounts-dir 改过）。目录不同时，那个目录的手动/缓存版本会一直
+    # 作用在真正的账号目录上。这里按最终目录无条件重算一次。
+    try:
+        wb_identity.configure_versions(_identity_version_overrides(ACCOUNTS_DIR))
+    except Exception as exc:
+        log("identity versions: bootstrap apply failed (%s)" % exc)
     # 日志落库（默认关闭）：在账号池之前初始化，好让「池加载失败」这类最需要
     # 事后留档的启动日志也能进库。关闭时这里只造一个 enabled=False 的空壳，
     # 不建文件、不改日志路径。
@@ -23675,6 +23760,9 @@ def _bootstrap_runtime(args):
     # 目录兜底：每天至少从上游 API 取一次（活跃使用的部署里 300s 缓存早就
     # 刷得更新，这个线程只兜长时间没人访问 / 一直吃缓存文件或内置快照）。
     start_catalog_daily()
+    # 版本缓存的生命周期：没有它，auto_refresh_versions 只在启动和面板保存
+    # 那一刻生效，长跑的进程永远不会按 TTL 再拉一次。
+    start_identity_versions()
     global PRICING
     # The policy table and its timeline live beside the usage log, so one
     # volume carries both and the request references resolve locally.

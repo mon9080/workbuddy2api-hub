@@ -77,9 +77,19 @@ class SwitchOffTests(unittest.TestCase):
                                                   bind_identity=False)
         self.assertNotIn("product", kwargs)
 
-    def test_a_stated_product_survives_without_the_switch(self):
+    def test_a_stated_product_is_also_suppressed_without_the_switch(self):
+        # "off means field-for-field what it was before" has to include rows
+        # that carry their own product, or the default is not compatible.
         row = dict(self.row, product="vscode")
-        kwargs = wb_accounts.normalise_import_row(row)
+        kwargs = wb_accounts.normalise_import_row(row, bind_identity=False)
+        self.assertNotIn("product", kwargs)
+
+    def test_snake_case_rows_keep_a_stated_product(self):
+        # The cockpit-shaped normalisation rebuilds the row from a whitelist;
+        # product has to survive it or "explicit wins" breaks for those rows.
+        row = {"access_token": _token(), "domain": "www.codebuddy.cn",
+               "uid": "u5", "product": "vscode"}
+        kwargs = wb_accounts.normalise_import_row(row, bind_identity=True)
         self.assertEqual(kwargs["product"], wb_identity.PRODUCT_VSCODE)
 
 

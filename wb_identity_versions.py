@@ -41,7 +41,30 @@ _PLAIN_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _REFRESHABLE = ("cli",)
 
 _lock = threading.Lock()
+#: 进程内最近一次成功获取的结果，按缓存路径分开存。
+#: 磁盘缓存是跨进程的，但它可能在只读挂载 / 磁盘满时写不进去；此时若只靠
+#: 重读磁盘去重，每个并发调用都会各自再拉一次。这里留一份内存结果兜底，
+#: 让写盘失败不影响"同一轮只拉一次"。
 _memory = {"loaded": False, "data": {}}
+
+
+def _recall(accounts_dir, key, now, ttl):
+    """In-process fallback for a version whose disk write failed.
+
+    Caller must already hold _lock: resolve() reads this inside the same
+    critical section that decides whether to fetch, so taking the lock again
+    here would deadlock (threading.Lock is not re-entrant).
+    """
+    row = (_memory["data"].get(accounts_dir) or {}).get(key)
+    if not row:
+        return None
+    version, fetched_at = row
+    return version if is_fresh(fetched_at, now=now, ttl=ttl) else None
+
+
+def _forget(accounts_dir):
+    with _lock:
+        _memory["data"].pop(accounts_dir, None)
 
 
 def cache_path(accounts_dir):
@@ -154,6 +177,11 @@ def resolve(accounts_dir, *, fetch=None, now=None, ttl=CACHE_TTL_SECONDS):
             if version is not None and is_fresh(fetched_at, now=now, ttl=ttl):
                 overrides[key] = version
                 continue
+            # 写盘失败时磁盘里永远是旧值；先看进程内有没有刚拉到的新值。
+            remembered = _recall(accounts_dir, key, now, ttl)
+            if remembered:
+                overrides[key] = remembered
+                continue
             if key != "cli":
                 continue
             fetched = fetcher()
@@ -166,6 +194,8 @@ def resolve(accounts_dir, *, fetch=None, now=None, ttl=CACHE_TTL_SECONDS):
             data[key] = {"version": fetched, "fetched_at": now, "source": "npm"}
             overrides[key] = fetched
             changed = True
+            # 内存兜底在锁外也能用：写盘失败不影响这一轮的结果复用。
+            _memory["data"].setdefault(accounts_dir, {})[key] = (fetched, now)
         if changed:
             _write_cache(accounts_dir, data)
     return overrides
@@ -188,7 +218,8 @@ def cached_versions(accounts_dir, now=None, ttl=CACHE_TTL_SECONDS):
 
 
 def clear_cache(accounts_dir):
-    """Drop the cache file. Returns True when it is gone afterwards."""
+    """Drop the cache file and the in-process copy. True when it is gone."""
+    _forget(accounts_dir)
     try:
         os.unlink(cache_path(accounts_dir))
         return True
