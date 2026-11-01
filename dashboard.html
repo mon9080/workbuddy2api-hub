@@ -1758,6 +1758,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '已启用：导入时按域名绑定出站身份': 'On: outbound identity is bound from the domain on import',
     '已关闭导入时按域名绑定出站身份': 'Binding outbound identity from the domain on import is off',
     '出站身份版本号自动刷新': 'Auto-refresh outbound identity versions',
+    '缓存有效期 3 天；后台每小时检查一次，过期后尝试从官方 npm 包 @tencent-ai/codebuddy-code 刷新 CodeBuddy CLI 的最新版本号，失败则在下一个小时继续重试；': 'The cache is valid for 3 days; a background check runs hourly and, once the entry is stale, refreshes the CodeBuddy CLI version from the official npm package @tencent-ai/codebuddy-code. A failed attempt is retried on the next hourly pass;',
     '启用自动刷新': 'Enable auto-refresh',
     '已启用：出站身份版本号自动刷新': 'On: outbound identity versions auto-refresh',
     '已关闭出站身份版本号自动刷新': 'Outbound identity version auto-refresh is off',
@@ -3394,6 +3395,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "已启用：导入时按域名绑定出站身份": "已啟用：匯入時按網域綁定出站身分",
     "已关闭导入时按域名绑定出站身份": "已關閉匯入時按網域綁定出站身分",
     "出站身份版本号自动刷新": "出站身分版本號自動重新整理",
+    "缓存有效期 3 天；后台每小时检查一次，过期后尝试从官方 npm 包 @tencent-ai/codebuddy-code 刷新 CodeBuddy CLI 的最新版本号，失败则在下一个小时继续重试；": "快取有效期 3 天；背景每小時檢查一次，過期後嘗試從官方 npm 套件 @tencent-ai/codebuddy-code 重新整理 CodeBuddy CLI 的最新版本號，失敗則在下一個小時繼續重試；",
     "启用自动刷新": "啟用自動重新整理",
     "已启用：出站身份版本号自动刷新": "已啟用：出站身分版本號自動重新整理",
     "已关闭出站身份版本号自动刷新": "已關閉出站身分版本號自動重新整理",
@@ -5562,7 +5564,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           <div>
             <h2 style="margin:0">出站身份版本号自动刷新 <em id="setAutoRefreshVersionsState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              每隔 3 天从官方 npm 包 <code>@tencent-ai/codebuddy-code</code> 查一次 CodeBuddy CLI 的最新版本号并缓存；<span id="setAutoRefreshVersionsCache"></span>
+              缓存有效期 3 天；后台每小时检查一次，过期后尝试从官方 npm 包 @tencent-ai/codebuddy-code 刷新 CodeBuddy CLI 的最新版本号，失败则在下一个小时继续重试；<span id="setAutoRefreshVersionsCache"></span>
             </div>
             <div style="font-size:12px;color:var(--warn);margin-top:4px">
               只刷新 CLI 的版本号——桌面端与 VSCode 插件没有公开的版本来源（官方升级接口需要账号鉴权），这里不会编造。版本号是线上指纹的一部分，但<b>只改字符串，不改头族与请求体</b>：发「新版本号 + 旧头族」未必比「旧版本号 + 旧头族」更安全，所以默认关闭。面板里手动填过的版本号永远优先。取不到时回落到已验证的默认值。
@@ -5691,9 +5693,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         </div>
       </section>
       <section>
-        <h2>单请求体上限</h2>
-        <div style="font-size:12px;color:var(--dim);margin:8px 0">超限时可临时调高后重试压缩请求；调高会增加并发请求的内存占用。保存后立即生效。</div>
-        <input id="setMaxPayloadMB" type="number" min="1" max="256" step="1" style="width:90px"> MB
+        <h2>单请求体上限 <em id="setMaxPayloadMBState"></em></h2>
+        <div style="font-size:12px;color:var(--dim);margin:8px 0">超限时可临时调高后重试压缩请求；调高会增加并发请求的内存占用。保存后立即生效。输入框填的是覆盖值（单位 MiB）；留空/未配置时使用启动参数 <code>WB_MAX_PAYLOAD_BYTES</code> 的值。</div>
+        <input id="setMaxPayloadMB" type="number" min="1" max="256" step="1" style="width:90px"> MiB
         <button onclick="saveMaxPayload(this)">保存</button>
       </section>
       <section>
@@ -12596,7 +12598,17 @@ async function loadSettings(showToast){
       // 上游响应头超时：没改过时后端给的就是默认 120，所以「等于 120」按默认态
       // 显示，只有被改过才标出实际秒数。
       const maxPayload = document.getElementById('setMaxPayloadMB');
-      if(maxPayload) maxPayload.value = data.max_payload_mb || Math.ceil((data.max_payload_bytes_effective || 16777216) / 1048576);
+      const payloadEffective = data.max_payload_bytes_effective || 16777216;
+      if(maxPayload) maxPayload.value = data.max_payload_mb || Math.ceil(payloadEffective / 1048576);
+      // 实际生效值按精确字节数显示：WB_MAX_PAYLOAD_BYTES 可以是任意字节数，
+      // 向上取整后填进输入框会让人以为限制就是那个整数 MiB（1500000 字节会
+      // 显示成 2 MiB）。输入框只用于设置新的覆盖值。
+      const payloadState = document.getElementById('setMaxPayloadMBState');
+      if(payloadState){
+        const exactMib = payloadEffective / 1048576;
+        const shown = Number.isInteger(exactMib) ? String(exactMib) : exactMib.toFixed(2);
+        payloadState.textContent = '（当前生效：' + payloadEffective.toLocaleString() + ' 字节 / ' + shown + ' MiB）';
+      }
       const headerTimeout = (data.upstream || {}).header_timeout_seconds;
       const headerTimeoutInput = document.getElementById('setHeaderTimeout');
       if(headerTimeoutInput){
