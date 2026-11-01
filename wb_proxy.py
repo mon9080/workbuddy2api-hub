@@ -14873,6 +14873,24 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             attempt_body = {k: v for k, v in attempt_body.items()
                             if k not in wb_identity.CLI_BODY_DROP_FIELDS}
             attempt_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
+            # 官方 CLI 2.179.1 的两条 chat 分支（见 wb_identity）：
+            #   - 请求表达了要思考 -> 补 reasoning_summary=auto
+            #   - 思考被关掉       -> 把 reasoning_effort 压成 "none"
+            # 客户端自己写了对应字段就不覆盖。
+            if wb_identity.thinking_is_off(attempt_body):
+                if "reasoning_effort" in attempt_body or "reasoningEffort" in attempt_body:
+                    key = ("reasoning_effort" if "reasoning_effort" in attempt_body
+                           else "reasoningEffort")
+                    attempt_body[key] = wb_identity.CLI_REASONING_EFFORT_OFF
+                else:
+                    # 只有 thinking.type=disabled、没写 effort 的请求：官方在
+                    # 这条分支上直接写 reasoning_effort，这里同样补上。
+                    attempt_body["reasoning_effort"] = \
+                        wb_identity.CLI_REASONING_EFFORT_OFF
+            else:
+                summary = wb_identity.reasoning_summary_for(attempt_body)
+                if summary:
+                    attempt_body["reasoning_summary"] = summary
         # 紧凑 JSON：官方客户端（Node JSON.stringify）不带分隔符后的空格，默认的
         # json.dumps(separators=(", ", ": ")) 会让 body 字节与 Content-Length 都成
         # 一处机器特征。上游解析等价，只影响线上字节。
