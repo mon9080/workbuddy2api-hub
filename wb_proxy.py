@@ -10308,6 +10308,8 @@ def runtime_settings_view():
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
+        "auto_bind_identity":
+            wb_settings.auto_bind_identity(ACCOUNTS_DIR),
         "realm_fallback_enabled":
             wb_settings.realm_fallback_enabled(ACCOUNTS_DIR),
         "account_max_concurrent":
@@ -20369,6 +20371,16 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_remaining_priority_enabled(ACCOUNTS_DIR, raw)
             reply["remaining_priority_enabled"] = raw
+        if "auto_bind_identity" in payload:
+            # 导入时按 domain 绑定出站身份（默认关）：与
+            # remaining_priority_enabled 同一形状——严格 JSON 布尔，
+            # 字符串 "false" 会是真值。
+            raw = payload.get("auto_bind_identity")
+            if not isinstance(raw, bool):
+                return self._error(400, "auto_bind_identity must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_auto_bind_identity(ACCOUNTS_DIR, raw)
+            reply["auto_bind_identity"] = raw
         if "egress_backoff_enabled" in payload:
             # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
             # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。
@@ -22109,6 +22121,9 @@ class Handler(BaseHTTPRequestHandler):
         forced_realm = (payload.get("realm") or "").strip().lower() or None
         if forced_realm and forced_realm not in ("intl", "cn"):
             return self._error(400, "realm must be intl or cn", "invalid_request_error")
+        # 按 domain 绑定出站身份（默认关，见 wb_settings.auto_bind_identity）。
+        # 预览与真导入共用同一个取值，否则「预演说会绑、真导入没绑」比不绑更糟。
+        bind_identity = wb_settings.auto_bind_identity(ACCOUNTS_DIR)
         if dry_run:
             # Validate every row without touching the pool so the caller can
             # see exactly what an import would do before committing to it.
@@ -22117,10 +22132,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json_panel(200, {
                 "dryRun": True,
                 "count": len(rows),
-                "result": POOL.preview_import_rows(rows, realm=forced_realm, overwrite=overwrite),
+                "result": POOL.preview_import_rows(rows, realm=forced_realm,
+                                                   overwrite=overwrite,
+                                                   bind_identity=bind_identity),
                 "accounts": account_views(),
             })
-        report = POOL.import_rows(rows, realm=forced_realm, overwrite=overwrite)
+        report = POOL.import_rows(rows, realm=forced_realm, overwrite=overwrite,
+                                  bind_identity=bind_identity)
         log("account import: %d added, %d updated, %d skipped, %d invalid"
             % (len(report["added"]), len(report["updated"]),
                len(report["skipped"]), len(report["invalid"])))

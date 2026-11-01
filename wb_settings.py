@@ -126,6 +126,11 @@ REMAINING_PRIORITY_ENABLED_KEY = "remaining_priority_enabled"
 # 派发路径上的失败归账与退避尺度，老安装保持原样（传输错误仍喂账号熔断）。
 EGRESS_BACKOFF_ENABLED_KEY = "egress_backoff_enabled"
 
+# 导入时按 domain 自动绑定出站身份（见 wb_identity.DOMAIN_PRODUCTS）。缺失键读作
+# 关：上游一直不写 product、靠 normalize_product() 兜底 workbuddy，自动绑定会
+# 改变导入结果，属于行为变更，老安装保持原样。
+AUTO_BIND_IDENTITY_KEY = "auto_bind_identity"
+
 # 跨出口回退（国际版 → 国内版）：国际版出口把某个模型限流 / 当日额度用满 /
 # 整池冷却时，允许拿同名的国内版出口再试一次。缺失键读作关 —— 两个出口是两套
 # 上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去
@@ -2018,6 +2023,33 @@ def set_remaining_priority_enabled(accounts_dir, enabled):
     with _lock:
         data = load(accounts_dir)
         data[REMAINING_PRIORITY_ENABLED_KEY] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def auto_bind_identity(accounts_dir):
+    """Whether an imported account takes its outbound identity from its domain.
+
+    Off unless the operator turns it on. With it off an import writes no
+    `product` at all, so the account falls back to WorkBuddy desktop exactly as
+    it did before this switch existed - the upstream contract in
+    wb_accounts.normalise_import_row() ("accounts that predate the field keep
+    their behaviour") stays intact for installs that never opt in.
+
+    With it on, www.codebuddy.cn / copilot.tencent.com / www.codebuddy.ai map to
+    the official CodeBuddy CLI identity and the two workbuddy hosts map to the
+    desktop identity (see wb_identity.DOMAIN_PRODUCTS). A domain the table does
+    not know writes nothing, so the old fallback still applies.
+    """
+    return load(accounts_dir).get(AUTO_BIND_IDENTITY_KEY) is True
+
+
+def set_auto_bind_identity(accounts_dir, enabled):
+    """Persist the domain-to-identity switch. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data[AUTO_BIND_IDENTITY_KEY] = enabled
         save(accounts_dir, data)
     return enabled
 

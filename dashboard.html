@@ -1751,6 +1751,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '启用优先调度': 'Enable priority dispatch',
     '已启用：剩余用量接近耗尽的组合优先调度': 'On: pairs close to their estimated limit are dispatched first',
     '已关闭剩余用量优先调度': 'Remaining-usage priority dispatch off',
+    '导入时按域名绑定出站身份': 'Bind outbound identity from the domain on import',
+    '导入账号时，按凭据里的域名选择出站身份：www.codebuddy.cn / copilot.tencent.com / www.codebuddy.ai 用官方 CodeBuddy CLI 身份；www.workbuddy.cn / www.workbuddy.ai 用 WorkBuddy 桌面端身份。默认关闭——关闭时导入不写身份，账号沿用原有的 WorkBuddy 桌面端兜底，升级前的行为完全不变。域名认不出时不写身份。': 'On import, pick the outbound identity from the credential\'s domain: www.codebuddy.cn / copilot.tencent.com / www.codebuddy.ai use the official CodeBuddy CLI identity; www.workbuddy.cn / www.workbuddy.ai use the WorkBuddy desktop identity. Off by default - with it off an import writes no identity at all and the account keeps the old WorkBuddy desktop fallback, so behaviour before the upgrade is unchanged. An unrecognised domain writes nothing.',
+    '只影响之后的导入，不会改动已存在的账号；已在面板上手动切换过的身份也不会被覆盖。导入行里显式写了身份时以它为准。': 'Affects later imports only; existing accounts are untouched, and an identity already switched by hand in the panel is never overwritten. An identity stated explicitly in the imported row always wins.',
+    '启用自动绑定': 'Enable auto-binding',
+    '已启用：导入时按域名绑定出站身份': 'On: outbound identity is bound from the domain on import',
+    '已关闭导入时按域名绑定出站身份': 'Binding outbound identity from the domain on import is off',
     '剩余积分 / 额度': 'Credits / quota left',
     '剩余积分 ·': 'Credits left ·',
     '剩余额度最大': 'Most quota left',
@@ -3376,6 +3382,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "账号当日消费的积分达到该值后，只允许请求免费模型（目录中标记为 x0.00 的模型），需要花费积分的模型自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示关闭（默认）。": "帳號當日消費的積分達到該值後，只允許請求免費模型（目錄中標記為 x0.00 的模型），需要花費積分的模型自動切到其他帳號；本地時間 0 點後自動恢復。填 0 表示關閉（預設）。",
     "账号「最早到期的积分包」（还有剩余、且到期会真正作废的那些）距今不超过该天数时，分派优先使用临期积分的账号——分到的流量更多、越接近到期份额越大，但不会全压在一个账号上（到期日相同或相近的账号彼此等权）；这些账号暂时都不可用（冷却、达日限额等）时，其他账号照常顶上。填 0 表示关闭；天数取自各账号最近一次刷新的积分数据。": "帳號「最早到期的積分包」（還有剩餘、且到期會真正作廢的那些）距今不超過該天數時，分派優先使用臨期積分的帳號——分到的流量更多、越接近到期份額越大，但不會全壓在一個帳號上（到期日相同或相近的帳號彼此等權）；這些帳號暫時都不可用（冷卻、達日限額等）時，其他帳號照常頂上。填 0 表示關閉；天數取自各帳號最近一次重新整理的積分資料。",
     "剩余用量优先调度": "剩餘用量優先排程",
+    "导入时按域名绑定出站身份": "匯入時按網域綁定出站身分",
+    "导入账号时，按凭据里的域名选择出站身份：www.codebuddy.cn / copilot.tencent.com / www.codebuddy.ai 用官方 CodeBuddy CLI 身份；www.workbuddy.cn / www.workbuddy.ai 用 WorkBuddy 桌面端身份。默认关闭——关闭时导入不写身份，账号沿用原有的 WorkBuddy 桌面端兜底，升级前的行为完全不变。域名认不出时不写身份。": "匯入帳號時，按憑證裡的網域選擇出站身分：www.codebuddy.cn / copilot.tencent.com / www.codebuddy.ai 用官方 CodeBuddy CLI 身分；www.workbuddy.cn / www.workbuddy.ai 用 WorkBuddy 桌面端身分。預設關閉——關閉時匯入不寫身分，帳號沿用原有的 WorkBuddy 桌面端兜底，升級前的行為完全不變。網域認不出時不寫身分。",
+    "只影响之后的导入，不会改动已存在的账号；已在面板上手动切换过的身份也不会被覆盖。导入行里显式写了身份时以它为准。": "只影響之後的匯入，不會改動已存在的帳號；已在面板上手動切換過的身分也不會被覆蓋。匯入列裡明確寫了身分時以它為準。",
+    "启用自动绑定": "啟用自動綁定",
+    "已启用：导入时按域名绑定出站身份": "已啟用：匯入時按網域綁定出站身分",
+    "已关闭导入时按域名绑定出站身份": "已關閉匯入時按網域綁定出站身分",
     "出口级瞬时失败退避": "出口級瞬時失敗退避",
     "启用出口级退避": "啟用出口級退避",
     "跨出口回退（国际版 → 国内版）": "跨出口回退（國際版 → 國內版）",
@@ -5510,6 +5522,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               启用优先调度
             </label>
             <button onclick="saveRemainingPriority(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">导入时按域名绑定出站身份 <em id="setAutoBindIdentityState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              导入账号时，按凭据里的域名选择出站身份：<b>www.codebuddy.cn</b> / <b>copilot.tencent.com</b> / <b>www.codebuddy.ai</b> 用官方 CodeBuddy CLI 身份；<b>www.workbuddy.cn</b> / <b>www.workbuddy.ai</b> 用 WorkBuddy 桌面端身份。默认关闭——关闭时导入不写身份，账号沿用原有的 WorkBuddy 桌面端兜底，升级前的行为完全不变。域名认不出时不写身份。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              只影响<b>之后的导入</b>，不会改动已存在的账号；已在面板上手动切换过的身份也不会被覆盖。导入行里显式写了身份时以它为准。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAutoBindIdentity" type="checkbox" style="width:16px;height:16px">
+              启用自动绑定
+            </label>
+            <button onclick="saveAutoBindIdentity(this)">保存</button>
           </div>
         </div>
       </section>
@@ -12456,6 +12489,14 @@ async function loadSettings(showToast){
         remainingPriorityState.textContent = remainingPriority ? '(已启用)' : '(未启用)';
         remainingPriorityState.style.color = remainingPriority ? 'var(--accent2)' : 'var(--dim)';
       }
+      const autoBindIdentity = data.auto_bind_identity === true;
+      const autoBindInput = document.getElementById('setAutoBindIdentity');
+      if(autoBindInput) autoBindInput.checked = autoBindIdentity;
+      const autoBindState = document.getElementById('setAutoBindIdentityState');
+      if(autoBindState){
+        autoBindState.textContent = autoBindIdentity ? '(已启用)' : '(未启用)';
+        autoBindState.style.color = autoBindIdentity ? 'var(--accent2)' : 'var(--dim)';
+      }
       const realmFallback = data.realm_fallback_enabled === true;
       const realmFallbackInput = document.getElementById('setRealmFallback');
       if(realmFallbackInput) realmFallbackInput.checked = realmFallback;
@@ -13612,6 +13653,21 @@ async function saveRemainingPriority(btn){
   try {
     await postJSON('/settings/save', {remaining_priority_enabled: value});
     toast(value ? '已启用：剩余用量接近耗尽的组合优先调度' : '已关闭剩余用量优先调度', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveAutoBindIdentity(btn){
+  const el = document.getElementById('setAutoBindIdentity');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {auto_bind_identity: value});
+    toast(value ? '已启用：导入时按域名绑定出站身份' : '已关闭导入时按域名绑定出站身份', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

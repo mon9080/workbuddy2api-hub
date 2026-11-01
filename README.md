@@ -202,7 +202,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 244 个套件：181 个 Python + 63 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 245 个套件：182 个 Python + 63 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12；推送 `v*` tag 时额外断言 **tag == 源码版本**（`-ci` 演练 tag 豁免）。
 
@@ -508,6 +508,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ## 六、版本更新记录 (Changelog)
 
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
+
+- **导入时按域名绑定出站身份（默认关）**：`normalise_import_row()` 此前从不写 `product`，导入的账号一律落到 `normalize_product()` 的兜底 `workbuddy`，于是 `www.codebuddy.cn` 名下的账号也顶着 WorkBuddy 桌面端指纹发出去。现在设置页新增「导入时按域名绑定出站身份」：开启后按 `wb_identity.DOMAIN_PRODUCTS` 取身份（`www.codebuddy.cn` / `copilot.tencent.com` / `www.codebuddy.ai` → 官方 CodeBuddy CLI，`www.workbuddy.cn` / `www.workbuddy.ai` → WorkBuddy 桌面端），域名认不出时不写、沿用原兜底。**默认关闭**：关闭时导入结果与改动前逐字段一致，升级前的行为完全不变；只影响之后的导入，已有账号与面板上手动切换过的身份都不会被改动，导入行里显式写了 `product` 时以它为准。预览与真导入共用同一个取值。新增 `tests/_test_domain_identity.py`（13 项）。 / **Bind the outbound identity from the domain on import (off by default)**: `normalise_import_row()` never wrote `product`, so every imported account fell through to `normalize_product()`'s `workbuddy` fallback and an account filed under `www.codebuddy.cn` went out wearing the WorkBuddy desktop fingerprint. A new panel switch binds the identity from `wb_identity.DOMAIN_PRODUCTS` (`www.codebuddy.cn` / `copilot.tencent.com` / `www.codebuddy.ai` → official CodeBuddy CLI, `www.workbuddy.cn` / `www.workbuddy.ai` → WorkBuddy desktop); an unrecognised domain writes nothing and keeps the old fallback. **Off by default**: with it off an import is field-for-field what it was before the change, so an upgraded install behaves identically. It affects later imports only — existing accounts and identities switched by hand in the panel are untouched, and a `product` stated in the imported row always wins. Preview and the real import share one value. Covered by `tests/_test_domain_identity.py` (13 checks).
 
 - **v1.10.0 发布**：集成 CodeArts 原生第三出口（#712/#715）、请求体上限面板动态调节（#709/#714）、Key 账号选择器搜索备注（#708/#717）、今日活动无记录状态优化（#706/#716）、最近请求跨天日期显示（#700/#713）与设置卡片重复修复（#710）。完整变更、验证范围与已知限制见 **[docs/CHANGELOG.md](docs/CHANGELOG.md#v1100)**；下一版的改动继续写在本段。
 - **v1.9.2 发布**：数据看板轮询防慢堆叠（#656）、更新卡片操作提示优化（#696）、密码组件环境异常明确报错（#658），详见 [更新记录](docs/CHANGELOG.md#v192)。

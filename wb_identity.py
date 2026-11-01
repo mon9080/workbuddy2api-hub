@@ -266,6 +266,47 @@ def normalize_product(value):
     return PRODUCT_DESKTOP
 
 
+#: 凭据 domain 对应的默认出站身份。
+#:
+#: 同一个 token 在两个站点下能解析出不同产品，所以「用哪套身份」本该由账号归属
+#: 决定。上游此前不给导入行写 product，一律落 normalize_product() 的兜底
+#: workbuddy——于是 codebuddy.cn 的账号也顶着 WorkBuddy 桌面端指纹发出去。
+#: 这张表把归属显式化，供导入路径按 domain 选身份（见 wb_accounts）。
+#:
+#: www.codebuddy.ai 在当前网络上解析不了（见 _ENDPOINTS 的注释），但归属仍是
+#: CodeBuddy 国际站，映射到 CLI 才与它的产品一致；实际出站端点另由
+#: endpoint_for() 决定，不受这里影响。
+DOMAIN_PRODUCTS = {
+    "www.codebuddy.cn": PRODUCT_CLI,
+    "copilot.tencent.com": PRODUCT_CLI,
+    "www.codebuddy.ai": PRODUCT_CLI,
+    "www.workbuddy.cn": PRODUCT_DESKTOP,
+    "www.workbuddy.ai": PRODUCT_DESKTOP,
+}
+
+
+def product_for_domain(domain):
+    """按凭据 domain 回传默认出站身份；认不出的域名回传 None。
+
+    认不出就不猜：调用方保留原值。凭据里的 domain 是客户端随手记下的字段，
+    可能过期或缺失（见 wb_accounts.realm_evidence 的同类取舍），此时按「没有
+    意见」处理，比按某个站点的身份硬套更安全。
+    """
+    host = str(domain or "").strip().lower()
+    if not host:
+        return None
+    # 去掉可能的 scheme 与路径，只比主机名。
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split("?", 1)[0]
+    # 端口不属于站点标识；只在有冒号且右侧全数字时剥掉。
+    if ":" in host:
+        name, _, port = host.rpartition(":")
+        if port.isdigit():
+            host = name
+    return DOMAIN_PRODUCTS.get(host)
+
+
 #: 国内版对话侧上游的默认 base。
 CN_CHAT_BASE_DEFAULT = "https://copilot.tencent.com"
 

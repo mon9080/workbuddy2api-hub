@@ -4268,7 +4268,8 @@ class AccountPool(object):
             self.accounts.remove(account)
             return True
 
-    def preview_import_rows(self, rows, realm=None, overwrite=False):
+    def preview_import_rows(self, rows, realm=None, overwrite=False,
+                            bind_identity=False):
         """Report what import_rows() would do, without touching the pool.
 
         Shares the same accept/skip rules as import_rows() so a dry run cannot
@@ -4279,7 +4280,8 @@ class AccountPool(object):
         seen = set()
         for index, row in enumerate(rows):
             try:
-                kwargs = normalise_import_row(row, realm=realm)
+                kwargs = normalise_import_row(row, realm=realm,
+                                              bind_identity=bind_identity)
             except Exception as exc:
                 preview["invalid"].append({"index": index + 1, "reason": str(exc)})
                 continue
@@ -4295,7 +4297,7 @@ class AccountPool(object):
             seen.add(uid)
         return preview
 
-    def import_rows(self, rows, realm=None, overwrite=False):
+    def import_rows(self, rows, realm=None, overwrite=False, bind_identity=False):
         """Add accounts from exported/foreign rows.
 
         Returns a report dict:
@@ -4305,13 +4307,15 @@ class AccountPool(object):
             invalid     - [{"index","reason"}] rows that could not be parsed
 
         Nothing is written until a row parses cleanly, so one bad entry does
-        not abort the rest of the file.
+        not abort the rest of the file. ``bind_identity`` is forwarded to
+        normalise_import_row(); see there for why it defaults to off.
         """
         added, updated, skipped, invalid = [], [], [], []
         seen = set()
         for index, row in enumerate(rows):
             try:
-                kwargs = normalise_import_row(row, realm=realm)
+                kwargs = normalise_import_row(row, realm=realm,
+                                              bind_identity=bind_identity)
             except Exception as exc:
                 invalid.append({"index": index + 1, "reason": str(exc)})
                 continue
@@ -5402,12 +5406,19 @@ def _coerce_account_rows(blob):
     return out, ""
 
 
-def normalise_import_row(row, realm=None):
+def normalise_import_row(row, realm=None, bind_identity=False):
     """Turn one exported/foreign row into Account kwargs.
 
     Accepts both the flat account shape and the nested desktop-credential shape
     so a file from either source imports cleanly. Raises ValueError when the
     row carries no usable credential.
+
+    ``bind_identity`` opts into writing ``product`` from the credential's domain
+    (see wb_identity.DOMAIN_PRODUCTS). It defaults to False so the key is absent
+    from the result, which keeps the documented fallback in Account.__init__
+    ("accounts that predate the field keep their behaviour") for every install
+    that has not turned the switch on. A row that states ``product`` explicitly
+    always wins, and a domain the table does not know writes nothing.
     """
     # cockpit tools exports a bare array of snake_case OAuth rows. Map it onto
     # the flat shape the rest of this function already understands; expires_at
@@ -5474,7 +5485,7 @@ def normalise_import_row(row, realm=None):
         raise ValueError("cannot determine uid (no uid field and no sub claim)")
 
     tasks_enabled = pick("tasksEnabled")
-    return {
+    out = {
         "uid": uid,
         "nickname": str(pick("nickname") or ""),
         "domain": domain_for_realm(detected, pick("domain")),
@@ -5495,3 +5506,14 @@ def normalise_import_row(row, realm=None):
         "lastError": "",
         "cooldownUntil": 0.0,
     }
+    # 出站身份：显式给的值永远优先；没有显式值且开关打开时，才按 domain 推导。
+    # 开关关着（默认）或域名认不出时不写这个键，Account.__init__ 仍按原逻辑
+    # 回退 workbuddy，导入结果与改动前逐字段一致。
+    stated = pick("product")
+    if stated:
+        out["product"] = wb_identity.normalize_product(stated)
+    elif bind_identity:
+        bound = wb_identity.product_for_domain(out["domain"])
+        if bound:
+            out["product"] = bound
+    return out
