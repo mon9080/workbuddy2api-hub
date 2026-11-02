@@ -14475,6 +14475,45 @@ def restriction_hold_message(realm, remaining):
             % (int(remaining), int(remaining)))
 
 
+def manual_task_gate(realm, targets):
+    """手动任务入口的风控门禁；返回 (refusal, allowed, skipped)。
+
+    API 派发（open_upstream 的快速失败）和调度器巡检（wb_scheduler 的
+    inspect 循环）动手前都查两道闸：账号级 restrictedUntil + 区域级连坐
+    暂停。手动按钮此前一道都没有——面板上点一下就直接发上游请求，账号被
+    限制时继续喂 403 / 11140，连坐暂停期间还把整池暂停当空气。
+
+    refusal 非 None：整单拒绝。区域暂停期间复用 restriction_hold_message
+    的口径；全部目标都处于限制窗口时单独说明。
+    allowed：剔除受限账号后的目标列表；skipped：被剔除的 (账号, 说明行)，
+    调用方把它带进各自的结果输出——少跑了几个号必须看得见，不能静默。
+
+    指定单个账号的请求只有那一个目标，被剔除即整单拒绝（refusal）；静默
+    跑成「0 个账号」只会让操作者再点一次，照样撞风控。
+    """
+    hold = restriction_hold_remaining(realm)
+    if hold > 0:
+        return restriction_hold_message(realm, hold), [], []
+    allowed = []
+    skipped = []
+    now = time.time()
+    for acc in targets or []:
+        if acc is None:
+            continue
+        remaining = getattr(acc, "restricted_until", 0.0) - now
+        if remaining <= 0:
+            allowed.append(acc)
+            continue
+        skipped.append((acc, "账号处于上游风控限制窗口，剩余 %ds，已跳过"
+                        % int(remaining)))
+    if skipped and not allowed:
+        if len(skipped) == 1:
+            return skipped[0][1], [], skipped
+        return ("全部 %d 个账号都处于上游风控限制窗口，本次手动任务拒绝执行"
+                % len(skipped)), [], skipped
+    return None, allowed, skipped
+
+
 def _persist_restriction(account):
     """把 restrictedUntil 落盘；失败只记日志，不影响请求路径。"""
     try:
@@ -21611,9 +21650,17 @@ class Handler(BaseHTTPRequestHandler):
             targets = POOL.task_accounts("cn")
         if not targets:
             return self._json_panel(200, {"ok": False, "msg": "未找到参与任务的国内版账号"})
+        refusal, targets, skipped = manual_task_gate("cn", targets)
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal})
         from wb_tasks import run_growth_tasks
         claim = payload.get("claim", True) is not False
         combined_logs = []
+        # 被风控跳过的号先亮出来：不然面板只显示「执行了 N-1 个」，
+        # 少的那一个去哪了全靠猜。
+        for acc, line in skipped:
+            nick = acc.nickname or (acc.uid[:8] if acc.uid else "?")
+            combined_logs.append(f"====== 账号 [{nick}] {line} ======")
         total_credit = 0
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
@@ -21649,6 +21696,10 @@ class Handler(BaseHTTPRequestHandler):
         target = POOL.get(uid)
         if not target or target.realm != "cn":
             return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+        # 单账号请求：受限即整单拒绝（manual_task_gate 对单目标语义）。
+        refusal, _allowed, _skipped = manual_task_gate("cn", [target])
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal})
         from wb_tasks import claim_task
         res = claim_task(target, code)
         invalidate_tasks_cache()
@@ -21672,8 +21723,14 @@ class Handler(BaseHTTPRequestHandler):
             targets = POOL.task_accounts("cn")
         if not targets:
             return self._json_panel(200, {"ok": False, "msg": "未找到参与任务的国内版账号"})
+        refusal, targets, skipped = manual_task_gate("cn", targets)
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal})
         from wb_tasks import run_streak_bonus
         results = []
+        for acc, line in skipped:
+            nick = acc.nickname or (acc.uid[:8] if acc.uid else "?")
+            results.append(f"{nick}: {line}")
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
             nick = acc.nickname or uid_str
@@ -21698,8 +21755,21 @@ class Handler(BaseHTTPRequestHandler):
             targets = POOL.task_accounts("cn")
         if not targets:
             return self._json_panel(200, {"ok": False, "msg": "未找到参与任务的国内版账号"})
+        refusal, targets, skipped = manual_task_gate("cn", targets)
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal})
         from wb_tasks import do_cat_travel
         results = []
+        # 受限跳过的号按 travel 结果的原形状记一行（action=skip），
+        # 面板表格不用为「跳过」另开一种渲染。
+        for acc, line in skipped:
+            results.append({
+                "uid": acc.uid,
+                "nickname": acc.nickname or (acc.uid[:8] if acc.uid else "?"),
+                "action": "skip",
+                "msg": line,
+                "reward_credit": 0
+            })
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
             nick = acc.nickname or uid_str
@@ -21916,7 +21986,15 @@ class Handler(BaseHTTPRequestHandler):
                          if a.realm == "cn"
                          and a.task_active()
                          and not a.uses_enterprise_billing()])
+        refusal, targets, skipped = manual_task_gate("cn", targets)
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal, "results": [], "accounts": account_views()})
         results = []
+        # 与 daily_chat 的受限自防御同一结果形状（ok/skipped/restricted/error）。
+        for acc, line in skipped:
+            results.append({"uid": acc.uid, "nickname": acc.nickname,
+                            "ok": False, "skipped": True, "restricted": True,
+                            "error": line})
         for account in targets:
             if account is None:
                 continue
@@ -21944,7 +22022,18 @@ class Handler(BaseHTTPRequestHandler):
                        if a.realm == "intl" and a.task_active() and str(a.uid) in wanted]
         else:
             targets = POOL.task_accounts("intl")
+        # intl 的区域暂停同样要挡：note_account_restriction 按 realm 记，
+        # 国际版撞 11140 一样会触发整池暂停，手动打卡不能当空气。
+        refusal, targets, skipped = manual_task_gate("intl", targets)
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal, "results": [], "accounts": account_views()})
         results = []
+        # daily_chat 自带的受限自防御（restricted/skipped）在此提前拦下，
+        # 连那一次上游探测都不发。
+        for acc, line in skipped:
+            results.append({"uid": acc.uid, "nickname": acc.nickname,
+                            "ok": False, "skipped": True, "restricted": True,
+                            "error": line})
         for account in targets:
             if account is None:
                 continue
@@ -21968,7 +22057,14 @@ class Handler(BaseHTTPRequestHandler):
             targets = [POOL.get(uid)]
         else:
             targets = POOL.task_accounts("intl")
+        refusal, targets, skipped = manual_task_gate("intl", targets)
+        if refusal:
+            return self._json_panel(200, {"ok": False, "msg": refusal, "results": [], "accounts": account_views()})
         results = []
+        for acc, line in skipped:
+            results.append({"uid": acc.uid, "nickname": acc.nickname,
+                            "ok": False, "skipped": True, "restricted": True,
+                            "error": line})
         for account in targets:
             if account is None:
                 continue
