@@ -3255,6 +3255,11 @@ def affinity_stable_key_enabled():
     return wb_settings.affinity_stable_key_enabled(ACCOUNTS_DIR) is True
 
 
+def session_header_key_enabled():
+    """SDK 会话头识别开关（默认关，关着时与上游逻辑一字不差）。"""
+    return wb_settings.session_header_key_enabled(ACCOUNTS_DIR) is True
+
+
 def remaining_schedule_weights():
     """{(uid, model): 权重}：估计剩余接近耗尽的组合，权重 > 1。
 
@@ -10353,6 +10358,8 @@ def runtime_settings_view():
         "account_inflight": account_inflight_snapshot(),
         "affinity_stable_key_enabled":
             wb_settings.affinity_stable_key_enabled(ACCOUNTS_DIR),
+        "session_header_key_enabled":
+            wb_settings.session_header_key_enabled(ACCOUNTS_DIR),
         "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
         "log_db_max_rows": wb_settings.log_db_max_rows(ACCOUNTS_DIR),
         "log_db_max_days": wb_settings.log_db_max_days(ACCOUNTS_DIR),
@@ -15666,7 +15673,7 @@ def probe_account(account, model=None, timeout=30):
     t0 = time.time()
     try:
         with wb_accounts.urlopen(req, timeout=timeout, proxy=account.proxy) as resp:
-            chat_obj = aggregate_stream(resp, model, None)
+            chat_obj = aggregate_stream(resp, model, None, prompt_source=probe_body)
             row["elapsed_ms"] = int((time.time() - t0) * 1000)
             choices = chat_obj.get("choices") or []
             msg = (choices[0].get("message") or {}) if choices else {}
@@ -15742,11 +15749,28 @@ def extract_session_key(headers, payload):
         headers.get("Session-Id") or
         payload.get("conversation_id") or
         payload.get("session_id") or
-        (payload.get("metadata") or {}).get("conversation_id")
+        (payload.get("metadata") or {}).get("conversation_id") or
+        # 排最后：只补位，不改动上面任何一个来源的既有优先级。
+        _sdk_session_header(headers)
     )
     if key:
         return str(key).strip()
     return None
+
+
+def _sdk_session_header(headers):
+    """SDK 客户端携带的会话 id 头，开关关着时回传 None。
+
+    Claude Code / Codex 这类 SDK 不把会话 id 放进 body，而是放在
+    `x-claude-code-session-id` 或 `session_id` 头里（两者拼写不同，各用各的）。
+    开关关着时它们不参与提取，这类客户端继续走 affinity_route 的
+    「按消息前缀派生会话键」兜底——见 session_header_key_enabled。
+    """
+    if not session_header_key_enabled():
+        return None
+    value = (headers.get("x-claude-code-session-id")
+             or headers.get("session_id"))
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 # CJK 计数走单遍 C 扫描：先 sub 掉 CJK 再按长度差计数，与原来的逐字符 Python
 # 循环逐值相等（64KB ASCII 实测 18.7ms -> 1.25ms）。别换 findall，实测更慢。
@@ -15828,6 +15852,14 @@ class SSEHeartbeat:
     A keepalive checked only before a blocking read cannot run during the very
     silence it is meant to cover. This daemon thread owns the same lock as the
     request's writes, so comments can never split a JSON/SSE frame.
+
+    It is also where a client hangup is first noticed: the keepalive write is
+    often the first byte to touch a socket the peer already closed. That fact
+    used to die with the thread - every later ``write()`` saw ``_closed`` and
+    returned quietly, so the request thread kept reading the upstream to EOF
+    for a client that was gone. ``_client_gone`` records it and ``write()``
+    raises ``ConnectionAbortedError`` on it, which every stream handler already
+    catches as ``client_aborted`` and answers by closing the upstream.
     """
 
     def __init__(self, write, interval=SSE_HEARTBEAT_SECONDS):
@@ -15837,6 +15869,7 @@ class SSEHeartbeat:
         self._last_write_at = time.monotonic()
         self._stop = threading.Event()
         self._closed = False
+        self._client_gone = False
         self._thread = threading.Thread(
             target=self._run, name="wb-sse-heartbeat", daemon=True)
         self._thread.start()
@@ -15845,9 +15878,20 @@ class SSEHeartbeat:
         if not data:
             return
         with self._lock:
+            if self._client_gone:
+                # Stop the read instead of feeding a socket nobody is on the
+                # other end of: the caller's client_aborted branch closes the
+                # upstream, releasing the account slot it holds.
+                raise ConnectionAbortedError("client disconnected")
             if self._closed:
                 return
-            self._write(data)
+            try:
+                self._write(data)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # The request thread hit the hangup itself; remember it so the
+                # next write (and the read loop behind it) stops too.
+                self._client_gone = True
+                raise
             self._last_write_at = time.monotonic()
 
     def _run(self):
@@ -15862,7 +15906,16 @@ class SSEHeartbeat:
                 try:
                     self._write(b": keepalive\n\n")
                     self._last_write_at = time.monotonic()
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError):
+                    # The peer hung up. Record it for the request thread rather
+                    # than only retiring this thread (see the class docstring).
+                    self._client_gone = True
+                    self._closed = True
+                    return
                 except Exception:
+                    # A write that failed for another reason says nothing about
+                    # the client, so it must not be reported as a hangup.
                     self._closed = True
                     return
 
@@ -15880,8 +15933,39 @@ class SSEHeartbeat:
         return False
 
 
-def aggregate_stream(raw_iter, model, resp_id):
-    """Fold an SSE stream into one non-streaming chat.completion object."""
+def estimate_prompt_tokens(messages, tools=None):
+    """Rough input-token count from the request the upstream was actually sent.
+
+    The fallback used to be ``completion_tokens // 2``, which has no relation to
+    the input at all: a long conversation answered in one short sentence was
+    logged as a handful of prompt tokens. The ratio is meaningless in both
+    directions, and it feeds the local daily token guard, so an undercount there
+    lets an account run past its cap.
+
+    This is a character-based estimate, not a tokenizer: it is only ever used
+    when the upstream reported no usage, and it must not be presented as a
+    billed figure. Tool schemas are included because they are resent every turn
+    and often dominate the input.
+    """
+    total = 0
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        total += estimate_tokens(_anthropic_json_text(msg.get("content")))
+        for call in msg.get("tool_calls") or []:
+            total += estimate_tokens(_anthropic_json_text(call))
+    for tool in tools or []:
+        total += estimate_tokens(_anthropic_json_text(tool))
+    return total
+
+
+def aggregate_stream(raw_iter, model, resp_id, prompt_source=None):
+    """Fold an SSE stream into one non-streaming chat.completion object.
+
+    ``prompt_source`` is the upstream request body, used only to estimate
+    ``prompt_tokens`` when the stream reported no usage (see
+    estimate_prompt_tokens).
+    """
     content, reasoning, finish = [], [], "stop"
     tool_calls_map = {}
     usage = None
@@ -16009,7 +16093,9 @@ def aggregate_stream(raw_iter, model, resp_id):
         full_r = "".join(reasoning)
         if full_c or full_r:
             comp = estimate_tokens(full_c) + estimate_tokens(full_r)
-            prompt_est = max(1, comp // 2)
+            prompt_est = max(1, estimate_prompt_tokens(
+                (prompt_source or {}).get("messages"),
+                (prompt_source or {}).get("tools")) or comp // 2)
             usage = {
                 "prompt_tokens": prompt_est,
                 "completion_tokens": comp,
@@ -20550,6 +20636,15 @@ class Handler(BaseHTTPRequestHandler):
                     "invalid_request_error")
             wb_settings.set_affinity_stable_key_enabled(ACCOUNTS_DIR, raw)
             reply["affinity_stable_key_enabled"] = raw
+        if "session_header_key_enabled" in payload:
+            # SDK 会话头识别：同样严格 JSON 布尔。
+            raw = payload.get("session_header_key_enabled")
+            if not isinstance(raw, bool):
+                return self._error(
+                    400, "session_header_key_enabled must be true or false",
+                    "invalid_request_error")
+            wb_settings.set_session_header_key_enabled(ACCOUNTS_DIR, raw)
+            reply["session_header_key_enabled"] = raw
         if "log_db_enabled" in payload or "log_db_max_rows" in payload \
                 or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
             # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
@@ -22594,7 +22689,8 @@ class Handler(BaseHTTPRequestHandler):
         web_tools = web_tools_active(base_body) if allow_web_tools else False
         while True:
             try:
-                chat_obj = aggregate_stream(upstream, model, None)
+                chat_obj = aggregate_stream(upstream, model, None,
+                                            prompt_source=base_body)
             except Exception as exc:
                 record_error(model, 502, str(exc),
                              elapsed_ms=int((time.time() - t_start) * 1000),
@@ -22760,7 +22856,8 @@ class Handler(BaseHTTPRequestHandler):
                                      base_body=None, session_key=None, realm=None,
                                      effort=None):
         try:
-            chat_obj = aggregate_stream(upstream, model, None)
+            chat_obj = aggregate_stream(upstream, model, None,
+                                        prompt_source=base_body)
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
             record_upstream_usage(upstream, model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
@@ -23152,9 +23249,10 @@ class Handler(BaseHTTPRequestHandler):
             if want_stream:
                 return self._chat_stream_response(
                     upstream, model, fp, account, t_start, effort=effort,
-                    reopen=reopen_stream)
+                    reopen=reopen_stream, prompt_source=forwarded)
             return self._chat_nonstream_response(
-                upstream, model, fp, account, t_start, effort=effort)
+                upstream, model, fp, account, t_start, effort=effort,
+                prompt_source=forwarded)
 
     def _open_codearts_chat(self, payload, session_key):
         """选号并打开 CodeArts 的 SSE 上游；返回 (stream, account, model)。"""
@@ -23203,9 +23301,11 @@ class Handler(BaseHTTPRequestHandler):
         with upstream:
             if want_stream:
                 return self._chat_stream_response(
-                    upstream, model, fp, account, t_start, realm=realm)
+                    upstream, model, fp, account, t_start, realm=realm,
+                    prompt_source=payload)
             return self._chat_nonstream_response(
-                upstream, model, fp, account, t_start, realm=realm)
+                upstream, model, fp, account, t_start, realm=realm,
+                prompt_source=payload)
 
     def _handle_codearts_responses(self, chat_req, session_key, model, want_stream,
                                    compaction, custom_names, request_meta, ns_map,
@@ -23265,7 +23365,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None,
                               reopen=None, headers_sent=False, retried=False,
-                              realm=None):
+                              realm=None, prompt_source=None):
             if not headers_sent:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -23441,7 +23541,8 @@ class Handler(BaseHTTPRequestHandler):
                             return self._chat_stream_response(
                                 new_upstream, model, fp, new_account, t_start,
                                 effort=new_effort, reopen=None,
-                                headers_sent=True, retried=True, realm=realm)
+                                headers_sent=True, retried=True, realm=realm,
+                                prompt_source=prompt_source)
                         finally:
                             try:
                                 new_upstream.close()
@@ -23474,10 +23575,13 @@ class Handler(BaseHTTPRequestHandler):
                 full_s = "".join(streamed_text)
                 if full_s:
                     comp = estimate_tokens(full_s)
+                    prompt_est = max(1, estimate_prompt_tokens(
+                        (prompt_source or {}).get("messages"),
+                        (prompt_source or {}).get("tools")) or comp // 2)
                     last_usage = {
-                        "prompt_tokens": max(1, comp // 2),
+                        "prompt_tokens": prompt_est,
                         "completion_tokens": comp,
-                        "total_tokens": max(1, comp // 2) + comp,
+                        "total_tokens": prompt_est + comp,
                         "completion_tokens_details": {"reasoning_tokens": 0},
                         "prompt_tokens_details": {"cached_tokens": 0},
                     }
@@ -23497,7 +23601,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None,
-                                 realm=None):
+                                 realm=None, prompt_source=None):
         egress_on = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
         egress_key = None
         if egress_on:
@@ -23505,7 +23609,8 @@ class Handler(BaseHTTPRequestHandler):
                 account.chat_base_url() + getattr(account, "chat_path", CHAT_PATH),
                 account.proxy)
         try:
-            result = aggregate_stream(upstream, model, None)
+            result = aggregate_stream(upstream, model, None,
+                                      prompt_source=prompt_source)
         except Exception as exc:
             if egress_on and egress_key:
                 wb_egress.note_transient(egress_key)

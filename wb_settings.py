@@ -218,6 +218,41 @@ def set_affinity_stable_key_enabled(accounts_dir, enabled):
         save(accounts_dir, data)
     return enabled
 
+
+# SDK 会话头识别（默认关）。
+#
+# Claude Code / Codex 这类 SDK 客户端不把会话 id 放进 body，而是放在
+# `x-claude-code-session-id` 或 `session_id` 头里。关着时 extract_session_key()
+# 只认本网关自己的 X-Conversation-Id 一族，这类客户端会退回「按消息前缀派生
+# 会话键」的兜底路径：键由 [system, 首条 user] 算出，两个开场白相同的会话会
+# 算出同一个键、共享同一个绑定槽，每轮互相覆盖（见 affinity_route）。
+#
+# 打开后这两个头也参与提取，键直接来自客户端，不再依赖前缀哈希。
+#
+# 默认关：改的是派发路径上的会话识别，老安装必须保持原逻辑；关着时
+# extract_session_key 与上游一字不差，可随时回退。
+SESSION_HEADER_KEY_ENABLED_KEY = "session_header_key_enabled"
+
+
+def session_header_key_enabled(accounts_dir):
+    """Whether the SDK session headers take part in session-key extraction."""
+    return load(accounts_dir).get(SESSION_HEADER_KEY_ENABLED_KEY) is True
+
+
+def set_session_header_key_enabled(accounts_dir, enabled):
+    """Persist the SDK-session-header switch. Returns the stored boolean.
+
+    Strict for the same reason as the affinity switch above: ``bool("false")``
+    is True, so a string from a caller would silently turn it on.
+    """
+    if not isinstance(enabled, bool):
+        raise ValueError("session_header_key_enabled must be true or false")
+    with _lock:
+        data = load(accounts_dir)
+        data[SESSION_HEADER_KEY_ENABLED_KEY] = enabled
+        save(accounts_dir, data)
+    return enabled
+
 # 日志落库：把运行日志追加写进 usage/logs.sqlite3，重启后仍能回看，方便事后
 # debug。缺失键读作关 —— 关着的时候日志只留在内存环形缓冲里，与上游一字不差；
 # 只有显式 true 才建库、落盘。

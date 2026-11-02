@@ -354,7 +354,7 @@ class PanelTestSuccessTests(unittest.TestCase):
         old = (wb_proxy.POOL, A.urlopen, wb_proxy.aggregate_stream)
         wb_proxy.POOL = Pool()
         A.urlopen = lambda *args, **kwargs: self._Response()
-        wb_proxy.aggregate_stream = lambda resp, model, key: {
+        wb_proxy.aggregate_stream = lambda resp, model, key, **kwargs: {
             "choices": [{"message": {"content": "OK"}}]}
         try:
             return wb_proxy.Handler._route_accounts_test(route, {"uid": account.uid})

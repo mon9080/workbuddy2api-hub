@@ -2215,6 +2215,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 '启用更稳的会话键': 'Enable stable key',
 '已启用：会话键包含首条回复': 'On: the key includes the first reply',
 '已关闭：会话键只用前两条消息': 'Off: the key uses the first two messages',
+'识别 SDK 会话头': 'Read SDK session headers',
+'Claude Code、Codex 这类 SDK 客户端不把会话 id 放进请求体，而是放在 x-claude-code-session-id 或 session_id 头里。关闭时网关只认自己的 X-Conversation-Id 一族，这类客户端只能按「消息前缀」推算会话键——两个开场白相同的会话会算出同一个键、每轮互相覆盖账号。开启后这两个头直接作为会话键，不再依赖前缀推算。默认关闭，关着时与会话识别逻辑一字不差。': 'SDK clients such as Claude Code and Codex do not put the session id in the request body; they send it in the x-claude-code-session-id or session_id header. With this off the gateway only honours its own X-Conversation-Id family, so those clients fall back to deriving the key from the message prefix - two conversations that open the same way hash to one key and overwrite each other every turn. With it on those headers become the session key directly and no prefix guessing is involved. Off by default: with it off session recognition is byte-identical to before.',
+'启用 SDK 会话头识别': 'Read SDK session headers',
     '上游响应头超时': 'Upstream response-header timeout',
     '单次尝试等上游返回响应头的上限（秒）。拿到响应头之前网关不会向客户端发出任何字节，所以这个值就是客户端要空等的时长：设得比客户端的首字节预算还大时，客户端会先断开（表现为 499 / 首字节迟迟不返回），而网关仍会按这个上限继续换账号重试。默认 120。': 'How long one attempt may wait for the upstream to send response headers (seconds). Nothing is sent to the client before those headers arrive, so this is exactly how long the client can end up waiting: set it above the client\'s first-byte budget and the client disconnects first (seen as a 499, or a first byte that never comes) while the gateway keeps retrying on the next account under the same limit. Default 120.',
     '调小的代价：上游偶尔确实算得慢的正常请求会被提前判失败、换账号重试，多消耗一次额度。建议不高于客户端的首字节预算。': 'The cost of lowering it: a normal request the upstream genuinely takes a long time to compute is failed early and retried on another account, spending one more unit of quota. Prefer a value no higher than the client\'s first-byte budget.',
@@ -5762,6 +5765,26 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               启用更稳的会话键
             </label>
             <button onclick="saveAffinityStableKey(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">识别 SDK 会话头 <span class="help-mark" role="button" tabindex="0" aria-label="功能说明" onclick="toggleHelpDetail('sessionHeaderKeyHelp', event)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleHelpDetail('sessionHeaderKeyHelp', event);}">!</span> <em id="setSessionHeaderKeyState"></em></h2>
+            <div class="help-detail" id="sessionHeaderKeyHelp" hidden>
+              Claude Code、Codex 这类 SDK 客户端不把会话 id 放进请求体，而是放在 <span class="mono">x-claude-code-session-id</span> 或 <span class="mono">session_id</span> 头里。关闭时网关只认自己的 X-Conversation-Id 一族，这类客户端只能按「消息前缀」推算会话键——两个开场白相同的会话会算出同一个键、每轮互相覆盖账号。
+              <br><br>
+              开启后这两个头直接作为会话键，不再依赖前缀推算。它们排在所有既有来源之后，只补位、不改动任何现有优先级。默认关闭，关着时与会话识别逻辑一字不差。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setSessionHeaderKey" type="checkbox" style="width:16px;height:16px">
+              启用 SDK 会话头识别
+            </label>
+            <button onclick="saveSessionHeaderKey(this)">保存</button>
           </div>
         </div>
       </section>
@@ -12590,6 +12613,14 @@ async function loadSettings(showToast){
         affinityStableKeyState.textContent = affinityStableKey ? '(已启用)' : '(未启用)';
         affinityStableKeyState.style.color = affinityStableKey ? 'var(--accent2)' : 'var(--dim)';
       }
+      const sessionHeaderKey = data.session_header_key_enabled === true;
+      const sessionHeaderKeyInput = document.getElementById('setSessionHeaderKey');
+      if(sessionHeaderKeyInput) sessionHeaderKeyInput.checked = sessionHeaderKey;
+      const sessionHeaderKeyState = document.getElementById('setSessionHeaderKeyState');
+      if(sessionHeaderKeyState){
+        sessionHeaderKeyState.textContent = sessionHeaderKey ? '(已启用)' : '(未启用)';
+        sessionHeaderKeyState.style.color = sessionHeaderKey ? 'var(--accent2)' : 'var(--dim)';
+      }
       SAVED_QUOTA_SCAN_MODELS = Array.isArray(data.quota_scan_models) ? data.quota_scan_models.slice() : [];
       QUOTA_SCAN_SELECTED = SAVED_QUOTA_SCAN_MODELS.slice();
       await loadQuotaScanCatalog();
@@ -13791,6 +13822,21 @@ async function saveAffinityStableKey(btn){
   try {
     await postJSON('/settings/save', {affinity_stable_key_enabled: value});
     toast(value ? '已启用：会话键包含首条回复' : '已关闭：会话键只用前两条消息', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveSessionHeaderKey(btn){
+  const el = document.getElementById('setSessionHeaderKey');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {session_header_key_enabled: value});
+    toast(value ? '已启用：识别 SDK 会话头' : '已关闭：只认网关自己的会话头', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
